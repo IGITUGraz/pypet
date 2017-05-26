@@ -67,6 +67,7 @@ except ImportError:
 
 from pypet.pypetlogging import LoggingManager, HasLogger, simple_logging_config
 from pypet.trajectory import Trajectory
+from pypet.trajectory import ConfigGroup, ParameterGroup
 from pypet.storageservice import HDF5StorageService, LazyStorageService
 from pypet.utils.mpwrappers import QueueStorageServiceWriter, LockWrapper, \
     PipeStorageServiceSender, PipeStorageServiceWriter, ReferenceWrapper, \
@@ -2105,7 +2106,7 @@ class Environment(HasLogger):
         """Displays a progressbar"""
         self._logging_manager.show_progress(n, total_runs)
 
-    def _make_kwargs(self, **kwargs):
+    def _make_kwargs(self, start_run_idx, **kwargs):
         """Creates the keyword arguments for the single run handling"""
         result_dict = {'traj': self._traj,
                        'logging_manager': self._logging_manager,
@@ -2122,6 +2123,7 @@ class Environment(HasLogger):
             if self._use_pool or self._use_scoop:
                 if self._use_scoop:
                     del result_dict['graceful_exit']
+                    result_dict['traj'] = self._traj.f_incremental_copy(run_ids=range(start_run_idx, len(self._traj)))
                 if self._freeze_input:
                     # Remember the full copy setting for the frozen input to
                     # change this back once the trajectory is received by
@@ -2140,16 +2142,20 @@ class Environment(HasLogger):
                 result_dict['clean_up_runs'] = False
         return result_dict
 
-    def _make_index_iterator(self, start_run_idx):
+    def _make_index_iterator(self, start_run_idx, traj=None):
         """Returns an iterator over the run indices that are not completed"""
-        total_runs = len(self._traj)
+
+        if traj is None:
+            traj = self._traj
+
+        total_runs = len(traj)
         for n in range(start_run_idx, total_runs):
             self._current_idx = n + 1
             if self._stop_iteration:
                 self._logger.debug('I am stopping new run iterations now!')
                 break
-            if not self._traj._is_completed(n):
-                self._traj.f_set_crun(n)
+            if not traj._is_completed(n):
+                traj.f_set_crun(n)
                 yield n
             else:
                 self._logger.debug('Run `%d` has already been completed, I am skipping it.' % n)
@@ -2157,7 +2163,7 @@ class Environment(HasLogger):
     def _make_iterator(self, start_run_idx, copy_data=False, **kwargs):
         """ Returns an iterator over all runs and yields the keyword arguments """
         if (not self._freeze_input) or (not self._multiproc):
-            kwargs = self._make_kwargs(**kwargs)
+            kwargs = self._make_kwargs(start_run_idx=start_run_idx, **kwargs)
 
         def _do_iter():
             if self._map_arguments:
@@ -2179,21 +2185,21 @@ class Environment(HasLogger):
                     if copy_data:
                         copied_kwargs = kwargs.copy()
                         if not self._freeze_input:
-                            copied_kwargs['traj'] = self._traj.f_copy(copy_leaves='explored',
-                                                                  with_links=True)
+                            copied_kwargs['traj'] = kwargs.get('traj', self._traj).f_copy(copy_leaves='explored',
+                                                                                          with_links=True)
                         yield copied_kwargs
                     else:
                         yield kwargs
             else:
-                for idx in self._make_index_iterator(start_run_idx):
+                for idx in self._make_index_iterator(start_run_idx, traj=kwargs.get('traj')):
                     if self._freeze_input:
                         # Frozen pool needs current run index
                         kwargs['idx'] = idx
                     if copy_data:
                         copied_kwargs = kwargs.copy()
                         if not self._freeze_input:
-                            copied_kwargs['traj'] = self._traj.f_copy(copy_leaves='explored',
-                                                                  with_links=True)
+                            copied_kwargs['traj'] = kwargs.get('traj', self._traj).f_copy(copy_leaves='explored',
+                                                                                          with_links=True)
                         yield copied_kwargs
                     else:
                         yield kwargs
@@ -2593,7 +2599,7 @@ class Environment(HasLogger):
                 if self._freeze_input:
                     self._logger.info('Freezing pool input')
 
-                    init_kwargs = self._make_kwargs()
+                    init_kwargs = self._make_kwargs(start_run_idx=start_run_idx)
 
                     # To work under windows we must allow the full-copy now!
                     # Because windows does not support forking!
@@ -2648,7 +2654,7 @@ class Environment(HasLogger):
 
                     scoop_full_copy = self._traj.v_full_copy
                     self._traj.v_full_copy = True
-                    init_kwargs = self._make_kwargs()
+                    init_kwargs = self._make_kwargs(start_run_idx=start_run_idx)
 
                     scoop_rev = self.name + '_' + str(time.time()).replace('.','_')
                     shared.setConst(**{scoop_rev: init_kwargs})

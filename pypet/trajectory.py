@@ -30,6 +30,8 @@ from pypet.utils.decorators import kwargs_api_change, not_in_run, copydoc, depre
 from pypet.utils.helpful_functions import is_debug, format_time
 from pypet.utils.storagefactory import storage_factory
 
+from sparse_list import SparseList
+
 
 def load_trajectory(name=None,
                     index=None,
@@ -1094,8 +1096,66 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
         return self.f_copy(copy_leaves=True,
                            with_links=True)
 
+    def f_incremental_copy(self, run_ids=[]):
+        """
+        This creates a partial copy for the sole purpose of pickling and transporting in
+        the case of multiprocessing. It has the following features:
+
+        1.  It copies only parameter leaves and parameter and config groups
+        2.  The run information is only containd for the specified run_ids
+        3.  All explored parameters of this trajectory now have sparse_lists
+            representing explored_data.
+
+        The above make the data in the new traj proportional to the number of run_ids
+        specified thereby giving an incremental copy.
+        
+        The following cannot be done using an incremental copy
+
+        1. The trajectory cannot be assigned any run index that is outside run_ids.
+        2. One cannot access any previous results in this trajectory although one may add them
+        """
+        def _is_parameter_or_config(node):
+            return isinstance(node, ParameterGroup) or isinstance(node, ConfigGroup) \
+                or (node.v_is_leaf and node.v_is_parameter)
+        old_full_copy = self.v_full_copy
+        self.v_full_copy = True
+        new_traj = self.f_copy(copy_leaves=True, with_links=True, predicate=_is_parameter_or_config)
+        self.v_full_copy = old_full_copy
+        new_traj.v_full_copy = old_full_copy
+        
+        # convert iterator to list
+        run_ids = list(run_ids)
+
+        # Convert run_ids to indexes
+        for i, run_idx in enumerate(run_ids):
+            if isinstance(run_idx, str):
+                run_ids[i] = new_traj._single_run_ids[run_idx]
+        
+        # Filter Result Information to only contain the
+        # entries for the relevant runs from now on
+        new_run_information = {}
+        new_single_run_ids = {}
+        for run_idx in run_ids:
+            run_name = new_traj._single_run_ids[run_idx]
+            new_run_information[run_name] = new_traj._run_information[run_name]
+            new_single_run_ids[run_idx] = run_name
+            new_single_run_ids[run_name] = run_idx
+        new_traj._run_information = new_run_information
+        new_traj._single_run_ids = new_single_run_ids
+
+        # Edit Parameters so that they contain sparse lists instead of lists
+        for param in new_traj._explored_parameters.values():
+            new_explored_range = SparseList(len(param._explored_range))
+            if len(new_explored_range) > 0:
+                for run_idx in run_ids:
+                    new_explored_range[run_idx] = param._explored_range[run_idx]
+                param._explored_range = new_explored_range
+
+        return new_traj
+
     def f_copy(self, copy_leaves=True,
-                     with_links=True):
+               with_links=True,
+               predicate=None):
         """Returns a *shallow* copy of a trajectory.
 
         :param copy_leaves:
@@ -1107,6 +1167,13 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
             Note that ``v_full_copy`` determines how these will be copied.
 
         :param with_links: If links should be ignored or followed and copied as well
+
+        :param predicate:
+
+            This is function such that only nodes for which it returns True are copied.
+            This is useful to create a partial copy of the trajectory. If None, no nodes
+            are excluded. (For more details look at the use of predicate in the function
+            :func:`~pypet.Trajectory.f_iter_nodes`).
 
         :return: A shallow copy
 
@@ -1166,7 +1233,8 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
         new_traj._is_run = self._is_run
 
         new_traj._copy_from(self, copy_leaves=copy_leaves,
-                                   with_links=with_links)
+                                   with_links=with_links,
+                                   predicate=predicate)
 
         # Copy references to new nodes and leaves
         for my_dict, new_dict in ((self._new_nodes, new_traj._new_nodes),
@@ -1189,7 +1257,8 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
     def _copy_from(self, node,
                           copy_leaves=True,
                           overwrite=False,
-                          with_links=True):
+                          with_links=True,
+                          predicate=None):
         """Pass a ``node`` to insert the full tree to the trajectory.
 
         Considers all links in the given node!
@@ -1209,6 +1278,13 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
 
             If existing elemenst should be overwritten. Requries ``__getstate__`` and
             ``__setstate__`` being implemented in the leaves.
+
+        :param predicate:
+
+            This is function such that only nodes for which it returns True are copied.
+            This is useful to create a partial copy of the trajectory. If None, no nodes
+            are excluded. (For more details look at the use of predicate in the function
+            :func:`~pypet.Trajectory.f_iter_nodes`).
 
         :param with_links: If links should be ignored or followed and copied as well
 
@@ -1271,7 +1347,7 @@ class Trajectory(DerivedParameterGroup, ResultGroup, ParameterGroup, ConfigGroup
                 if other_root is self:
                     raise RuntimeError('You cannot copy a given tree to itself!')
                 result = _add_group(node)
-                nodes_iterator = node.f_iter_nodes(recursive=True, with_links=with_links)
+                nodes_iterator = node.f_iter_nodes(recursive=True, with_links=with_links, predicate=predicate)
                 has_links = []
                 if node._links:
                     has_links.append(node)
