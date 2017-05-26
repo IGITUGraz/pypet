@@ -2172,7 +2172,7 @@ class Environment(HasLogger):
                 for key in list(self._kwargs.keys()):
                     self._kwargs[key] = iter(self._kwargs[key])
 
-                for idx in self._make_index_iterator(start_run_idx):
+                for idx in self._make_index_iterator(start_run_idx, traj=kwargs.get('traj')):
                     iter_args = tuple(next(x) for x in self._args)
                     iter_kwargs = {}
                     for key in self._kwargs:
